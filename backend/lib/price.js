@@ -1,0 +1,79 @@
+const JUP = process.env.JUP_PRICE_BASE;
+const BIRDEYE = process.env.BIRDEYE_PRICE_BASE;
+const BIRDEYE_KEY = process.env.BIRDEYE_API_KEY;
+const DEX = process.env.DEXSCREENER_TOKEN_BASE;
+
+// In-memory cache for prices (60 seconds TTL)
+const priceCache = new Map();
+
+async function getPriceUSD(mint) {
+  // Check cache first
+  const cached = priceCache.get(mint);
+  if (cached && Date.now() - cached.timestamp < 60000) {
+    return cached.price;
+  }
+
+  let price = null;
+
+  try {
+    // 1) Jupiter v4
+    const r1 = await fetch(JUP + encodeURIComponent(mint));
+    if (r1.ok) {
+      const j = await r1.json();
+      const p = j?.data?.[mint]?.price;
+      if (p) price = Number(p);
+    }
+  } catch {}
+
+  // 2) Birdeye (if API key available)
+  if (price == null && BIRDEYE_KEY) {
+    try {
+      const r2 = await fetch(BIRDEYE + encodeURIComponent(mint), {
+        headers: { 'X-API-KEY': BIRDEYE_KEY, 'accept': 'application/json' }
+      });
+      if (r2.ok) {
+        const j = await r2.json();
+        const p = j?.data?.value;
+        if (p) price = Number(p);
+      }
+    } catch {}
+  }
+
+  // 3) DexScreener fallback
+  if (price == null) {
+    try {
+      const r3 = await fetch(DEX + encodeURIComponent(mint));
+      if (r3.ok) {
+        const j = await r3.json();
+        const pair = j?.pairs?.find(p => p?.priceUsd);
+        if (pair?.priceUsd) price = Number(pair.priceUsd);
+      }
+    } catch {}
+  }
+
+  // Cache the result (including null)
+  priceCache.set(mint, { price, timestamp: Date.now() });
+
+  return price;
+}
+
+async function getLiquidityUSD(mint) {
+  const base = DEX || 'https://api.dexscreener.com/latest/dex/tokens/';
+  try {
+    const r = await fetch(base + encodeURIComponent(mint));
+    if (!r.ok) return null;
+    const j = await r.json();
+    const pairs = j?.pairs || [];
+    if (!pairs.length) return null;
+    const best = pairs.reduce((a, b) => (Number(a?.liquidity?.usd || 0) > Number(b?.liquidity?.usd || 0) ? a : b));
+    const usd = Number(best?.liquidity?.usd || 0);
+    return Number.isFinite(usd) && usd > 0 ? usd : null;
+  } catch {
+    return null;
+  }
+}
+
+module.exports = {
+  getPriceUSD,
+  getLiquidityUSD
+};

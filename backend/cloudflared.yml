@@ -1,0 +1,7 @@
+tunnel: meridian-dev
+credentials-file: /Users/ap/.cloudflared/meridian-dev.json
+
+ingress:
+  - hostname: dev.usemeridian.xyz
+    service: http://localhost:4000
+  - service: http_status:404
