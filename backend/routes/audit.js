@@ -1,11 +1,13 @@
 const { getTokenSupplyDecimals, getTokenSupply, getAllHoldersForMint } = require('../lib/helius.js');
-const { getPriceUSD, getLiquidityUSD } = require('../lib/price.js');
+const { getPriceUSD, getLiquidityUSD, getCachedTokenMetadata, getTokenMetadata } = require('../lib/price.js');
 const { tierOf, calculateTierCounts, calculateTopNBalances } = require('../lib/tiers.js');
-const { insertSearch, getLatestSnapshotInBucket, getRecentSnapshot, getPreviousSnapshot, insertSnapshot, insertTopHolders, upsertWhales } = require('../lib/db.js');
+const { insertSearch, getLatestSnapshotInBucket, getRecentSnapshot, getPreviousSnapshot, getPreviousSnapshotBefore, insertSnapshot, insertTopHolders, upsertWhales, updateSnapshotMeta } = require('../lib/db.js');
 const { getLabelsForHolders, filterExcludedHolders } = require('../lib/labels.js');
 const { generateAutoLabels } = require('../lib/labeling.js');
 const { processWhaleDetection, getWhaleStats } = require('../lib/whale-detection.js');
 const { updateTokenProfile, getTokenProfile } = require('../lib/token-profiles.js');
+const { formatAuditResponse, getNotableHoldersWithChanges } = require('../lib/audit-formatter.js');
+const { LiquidityDetector } = require('../lib/liquidity-detector.js');
 
 async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end();
@@ -56,6 +58,12 @@ async function handler(req, res) {
 
     // Get price & liquidity
     const price = await getPriceUSD(mint);
+    let { name: tokenName, symbol: tokenTicker } = getCachedTokenMetadata(mint);
+    if (!tokenName || !tokenTicker) {
+      const meta = await getTokenMetadata(mint);
+      tokenName = tokenName || meta.name;
+      tokenTicker = tokenTicker || meta.symbol;
+    }
     const liquidityUsd = await getLiquidityUSD(mint);
 
     // Convert to holders array with UI amounts
@@ -75,12 +83,33 @@ async function handler(req, res) {
     // Get labels for all holders
     const labelMap = await getLabelsForHolders(holders);
 
+    // Detect liquidity pools
+    const liquidityDetector = new LiquidityDetector();
+    const detectedLPs = await liquidityDetector.detectLiquidityPools(mint, holders);
+    
+    // Add detected LPs to label map
+    detectedLPs.forEach(lp => {
+      labelMap.set(lp.address, { 
+        type: lp.type, 
+        label: lp.label,
+        confidence: lp.confidence,
+        source: lp.source 
+      });
+    });
+
     // Filter out CEX and LP holders for analytics
     const analyzable = filterExcludedHolders(holders, labelMap);
 
     // Filter to eligible holders (USD >= 100) when price is available
     const eligible = price ? analyzable.filter(h => h.usd >= 100) : [];
     const total_holders_eligible = eligible.length;
+
+    // Assign tiers to eligible holders
+    if (price) {
+      eligible.forEach(holder => {
+        holder.tier = tierOf(holder.usd);
+      });
+    }
 
     // Calculate tier counts (only when price is available)
     let tierCounts = {};
@@ -117,25 +146,70 @@ async function handler(req, res) {
       top100_percent: topNBalances.top100_balance / uiSupply
     } : { top1_percent: 0, top10_percent: 0, top50_percent: 0, top100_percent: 0 };
 
-    const tierSupplyUsd = price ? {
-      shrimp: eligible.filter(h => tierOf(h.usd) === 'Shrimp').reduce((s, x) => s + x.ui, 0) / uiSupply,
-      fish: eligible.filter(h => tierOf(h.usd) === 'Fish').reduce((s, x) => s + x.ui, 0) / uiSupply,
-      dolphin: eligible.filter(h => tierOf(h.usd) === 'Dolphin').reduce((s, x) => s + x.ui, 0) / uiSupply,
-      shark: eligible.filter(h => tierOf(h.usd) === 'Shark').reduce((s, x) => s + x.ui, 0) / uiSupply,
-      whale: eligible.filter(h => tierOf(h.usd) === 'Whale').reduce((s, x) => s + x.ui, 0) / uiSupply
+    // Compute tier UI totals and counts using all non-excluded holders.
+    // Include < $100 balances by folding them into Shrimp, so totals approach 100%.
+    let tierUiTotals = { shrimp: 0, fish: 0, dolphin: 0, shark: 0, whale: 0 };
+    let tierCountTotals = { shrimp: 0, fish: 0, dolphin: 0, shark: 0, whale: 0 };
+    if (price && uiSupply > 0) {
+      for (const h of analyzable) {
+        if (h.usd == null) continue;
+        const t = tierOf(h.usd) || (h.usd < 100 ? 'Shrimp' : null);
+        if (!t) continue;
+        const key = t.toLowerCase();
+        if (tierUiTotals[key] != null) tierUiTotals[key] += h.ui;
+        if (tierCountTotals[key] != null) tierCountTotals[key] += 1;
+      }
+    }
+    const tierSupplyUsd = uiSupply > 0 ? {
+      shrimp: tierUiTotals.shrimp / uiSupply,
+      fish: tierUiTotals.fish / uiSupply,
+      dolphin: tierUiTotals.dolphin / uiSupply,
+      shark: tierUiTotals.shark / uiSupply,
+      whale: tierUiTotals.whale / uiSupply
     } : { shrimp: 0, fish: 0, dolphin: 0, shark: 0, whale: 0 };
 
     const marketCapUsd = price ? price * uiSupply : null;
 
-    // Insert snapshot
+    // Insert snapshot using the actual database schema
+    const capturedAtIso = new Date().toISOString();
     const snapshotId = await insertSnapshot({
       token_address: mint,
       bucket_10m: bucket,
+      captured_at: capturedAtIso,
       price_usd: price,
-      total_holders: total_holders_all,
-      ...tierCounts,
-      ...topNBalances
+      // fill minimal fields synchronously; backfill metadata right after
+      total_holders: total_holders_all, // Use total holders count (all holders)
+      whale_count: tierCounts.whale_count || 0,
+      shark_count: tierCounts.shark_count || 0,
+      dolphin_count: tierCounts.dolphin_count || 0,
+      fish_count: tierCounts.fish_count || 0,
+      shrimp_count: tierCounts.shrimp_count || 0,
+      top1_balance: topNBalances.top1_balance || 0,
+      top10_balance: topNBalances.top10_balance || 0,
+      top50_balance: topNBalances.top50_balance || 0,
+      top100_balance: topNBalances.top100_balance || 0
     });
+    
+    // Backfill metadata fields in the background to avoid nulls
+    try {
+      // Prefer freshly computed values; fall back to prior snapshot or token profile
+      const prevSnap = await getPreviousSnapshotBefore(mint, capturedAtIso);
+      const profile = await getTokenProfile(mint);
+
+      const safeTokenName = tokenName || prevSnap?.token_name || profile?.name || null;
+      const safeTokenTicker = tokenTicker || prevSnap?.token_ticker || profile?.symbol || null;
+      const safeTotalSupplyUi = (uiSupply && Number(uiSupply) > 0) ? uiSupply : (prevSnap?.total_supply_ui || null);
+      const safeTierSupplyUi = (tierUiTotals && Object.keys(tierUiTotals).length > 0) ? tierUiTotals : (prevSnap?.tier_supply_ui || {});
+
+      await updateSnapshotMeta(snapshotId, {
+        token_name: safeTokenName,
+        token_ticker: safeTokenTicker,
+        total_supply_ui: safeTotalSupplyUi,
+        tier_supply_ui: safeTierSupplyUi
+      });
+    } catch {}
+
+    console.log('Snapshot inserted with ID:', snapshotId);
 
     // Persist top holders for forensics
     if (persistTopHolders && eligible.length > 0) {
@@ -181,10 +255,10 @@ async function handler(req, res) {
       await generateAutoLabels(snapshotId, mint);
     }
 
-    // Deltas vs previous snapshot (most recent prior)
-    const prev = await getPreviousSnapshot(mint);
+    // Deltas vs previous snapshot (most recent prior to current capture time)
+    const prev = await getPreviousSnapshotBefore(mint, capturedAtIso);
     const deltas = prev ? {
-      holders: total_holders_all - (prev.total_holders || 0),
+      holders: (total_holders_all || 0) - (prev.total_holders || 0),
       shrimp: (tierCounts.shrimp_count || 0) - (prev.shrimp_count || 0),
       fish: (tierCounts.fish_count || 0) - (prev.fish_count || 0),
       dolphin: (tierCounts.dolphin_count || 0) - (prev.dolphin_count || 0),
@@ -197,26 +271,13 @@ async function handler(req, res) {
       )
     } : null;
 
-    // Notable holders (top 20 prioritized)
-    const labeledEligible = eligible
+    // Notable holders (top 20 by USD value, using shared function)
+    const sortedEligible = eligible
       .map(h => ({ ...h, label: labelMap.get(h.owner) || null }))
       .sort((a, b) => (b.usd || 0) - (a.usd || 0));
 
-    const priority = [];
-    // include all labeled (CEX, LP, SmartMoney, TopHolder)
-    for (const h of labeledEligible) {
-      if (h.label) priority.push(h);
-      if (priority.length >= 20) break;
-    }
-    // fill with whales (≥ $250k) if needed
-    if (priority.length < 20) {
-      for (const h of labeledEligible) {
-        if (!h.label && h.usd >= 250000) priority.push(h);
-        if (priority.length >= 20) break;
-      }
-    }
-
-    const notable_holders = priority.slice(0, 20).map(h => ({
+    // Format holders for shared function
+    const formattedHolders = sortedEligible.slice(0, 50).map(h => ({
       address: h.owner,
       label: h.label?.label || null,
       balance_ui: h.ui,
@@ -224,57 +285,49 @@ async function handler(req, res) {
       percent_supply: uiSupply > 0 ? h.ui / uiSupply : 0
     }));
 
+    // Get notable holders with percentage changes using shared function
+    const notable_holders = await getNotableHoldersWithChanges(mint, formattedHolders, snapshotId, uiSupply);
+
     const whales_detected = analyzable.filter(h => h.usd >= 250000).slice(0, 50).map(h => h.owner);
 
-    // Build response object
-    const response = { 
-      snapshot_id: snapshotId, 
-      created: true,
-      token: { mint, decimals },
-      price_usd: price,
-      market_cap_usd: marketCapUsd,
-      liquidity_usd: liquidityUsd,
-      total_holders_all,
+    // Get token profile for additional metadata
+    const tokenProfile = await getTokenProfile(mint);
+
+    // Use shared formatter
+    const response = await formatAuditResponse({
+      mint,
+      snapshot: { id: snapshotId, total_holders: total_holders_all },
+      dataAge: { minutes: 0, hours: 0, days: 0, formatted: 'Just now' },
+      tokenProfile,
+      totalSupply: uiSupply,
+      price,
       total_holders_eligible,
-      tier_counts: {
-        shrimp: tierCounts.shrimp_count,
-        fish: tierCounts.fish_count,
-        dolphin: tierCounts.dolphin_count,
-        shark: tierCounts.shark_count,
-        whale: tierCounts.whale_count
-      },
-      topN_percent_supply: {
-        top1: topNPercent.top1_percent,
-        top10: topNPercent.top10_percent,
-        top50: topNPercent.top50_percent,
-        top100: topNPercent.top100_percent
-      },
-      percent_supply_by_tier: tierSupplyUsd,
+      tierCounts,
+      topNBalances,
+      topNPercent,
       deltas,
       notable_holders,
-      whales_detected,
-      // legacy flat fields kept temporarily
-      total_holders: total_holders_all,
-      price_usd: price,
-      ...tierCounts,
-      ...topNBalances
-    };
+      whaleStats,
+      whaleStatsPending
+    });
 
-    // Add whale stats if available
-    if (whaleStats) {
-      response.whales = {
-        count: whaleStats.count,
-        supply_percent: whaleStats.count > 0 ? 
-          (whaleStats.top.reduce((sum, w) => sum + w.usd_value, 0) / (marketCapUsd || 1)) * 100 : 0,
-        retention: whaleStats.retention,
-        top: whaleStats.top
-      };
-    }
-
-    // Add pending flag if whale stats failed
-    if (whaleStatsPending) {
-      response.whale_stats_pending = true;
-    }
+    // Add live-specific fields
+    response.snapshot_id = snapshotId;
+    response.created = true;
+    response.token = { mint, decimals };
+    response.liquidity_usd = liquidityUsd;
+    response.total_holders_all = total_holders_all;
+    response.whales_detected = whales_detected;
+    response.percent_supply_by_tier = tierSupplyUsd;
+    // Holder-share percentages and raw counts across ALL holders
+    response.tier_counts_all = tierCountTotals;
+    response.percent_holders_by_tier = total_holders_all > 0 ? {
+      whale: (tierCountTotals.whale || 0) / total_holders_all,
+      shark: (tierCountTotals.shark || 0) / total_holders_all,
+      dolphin: (tierCountTotals.dolphin || 0) / total_holders_all,
+      fish: (tierCountTotals.fish || 0) / total_holders_all,
+      shrimp: (tierCountTotals.shrimp || 0) / total_holders_all
+    } : { whale: 0, shark: 0, dolphin: 0, fish: 0, shrimp: 0 };
 
     res.json(response);
   } catch (e) {

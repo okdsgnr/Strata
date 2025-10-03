@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+:root {
+  --background: #0B0C14;
+  --foreground: #ffffff;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Define a single source of truth for bottom nav height */
+:root {
+  --bottom-nav-h: 72px;
+}
+
+/* Force-hide Next.js dev toolbox and overlays (client-side CSS) */
+[data-nextjs-toolbox],
+#__next-dev-overlay,
+[data-nextjs-dev-overlay],
+script[data-nextjs-dev-overlay],
+[data-nextjs-toast],
+.nextjs-toast,
+#nextjs-toast,
+#__next-route-announcer,
+[data-nextjs-route-info],
+[data-nextjs-portal],
+nextjs-portal {
+  display: none !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+}

@@ -1,33 +1,45 @@
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../../lib/supabase');
+const usageTracker = require('../../lib/usage-tracker');
 
 router.get('/status', async (req, res) => {
   try {
-    // Get user ID from Supabase auth
-    const { user } = await supabase.auth.getUser(req.headers.authorization);
-    if (!user) {
-      return res.status(401).json({ error: 'Unauthorized' });
+    const authHeader = req.headers.authorization;
+    
+    // Check if user is authenticated
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      // Authenticated user flow
+      const token = authHeader.split(' ')[1];
+      const { data: { user }, error } = await supabase.auth.getUser(token);
+      
+      if (error || !user) {
+        return res.status(401).json({ error: 'Invalid token' });
+      }
+
+      // Check subscription for authenticated user
+      const subscription = await usageTracker.checkAuthenticatedUser(user.id);
+      
+      res.json({
+        authenticated: true,
+        active: subscription.hasActiveSubscription,
+        plan: subscription.plan,
+        expires_at: subscription.expiresAt,
+        user_id: user.id
+      });
+    } else {
+      // Anonymous user flow
+      const usage = await usageTracker.checkAnonymousUsage(req);
+      
+      res.json({
+        authenticated: false,
+        active: usage.canSearch,
+        plan: 'free',
+        remaining_searches: usage.remaining,
+        total_searches: usage.total,
+        fingerprint: usage.fingerprint
+      });
     }
-
-    // Get subscription
-    const { data, error } = await supabase
-      .from('user_subscriptions')
-      .select('*')
-      .eq('user_id', user.id)
-      .single();
-
-    if (error) throw error;
-
-    // Check if subscription is active
-    const active = data?.status === 'active' && 
-      (!data.expiry_date || new Date(data.expiry_date) > new Date());
-
-    res.json({
-      active,
-      plan: data?.plan,
-      expires_at: data?.expiry_date
-    });
   } catch (error) {
     console.error('Status check error:', error);
     res.status(500).json({ error: 'Internal server error' });

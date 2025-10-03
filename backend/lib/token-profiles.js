@@ -1,7 +1,4 @@
-const { Pool } = require('pg');
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL
-});
+const { supabase } = require('./supabase');
 
 /**
  * Get or create token profile
@@ -9,24 +6,28 @@ const pool = new Pool({
 async function getOrCreateTokenProfile(tokenAddress) {
   try {
     // Check if profile exists
-    const existing = await pool.query(`
-      SELECT * FROM token_profiles WHERE token_address = $1
-    `, [tokenAddress]);
-
-    if (existing.rows.length > 0) {
-      return existing.rows[0];
-    }
+    const { data: existing, error: existingErr } = await supabase
+      .from('token_profiles')
+      .select('*')
+      .eq('token_address', tokenAddress)
+      .maybeSingle();
+    if (existingErr) throw existingErr;
+    if (existing) return existing;
 
     // Create new profile
     const created_at = await getTokenCreationDate(tokenAddress);
-    const result = await pool.query(`
-      INSERT INTO token_profiles (token_address, created_at, last_activity, cache_window)
-      VALUES ($1, $2, NOW(), interval '10 minutes')
-      RETURNING *
-    `, [tokenAddress, created_at]);
-
-    console.log(`Created new token profile for ${tokenAddress}`);
-    return result.rows[0];
+    const { data: inserted, error: insertErr } = await supabase
+      .from('token_profiles')
+      .insert({
+        token_address: tokenAddress,
+        created_at,
+        last_activity: new Date().toISOString(),
+        cache_window: '10 minutes'
+      })
+      .select('*')
+      .single();
+    if (insertErr) throw insertErr;
+    return inserted;
 
   } catch (error) {
     console.error('Error getting/creating token profile:', error);
@@ -56,21 +57,19 @@ async function updateTokenProfile(tokenAddress) {
     const profile = await getOrCreateTokenProfile(tokenAddress);
     
     // Update last activity
-    await pool.query(`
-      UPDATE token_profiles 
-      SET last_activity = NOW()
-      WHERE token_address = $1
-    `, [tokenAddress]);
+    await supabase
+      .from('token_profiles')
+      .update({ last_activity: new Date().toISOString() })
+      .eq('token_address', tokenAddress);
 
     // Determine new cache window based on token classification
     const newCacheWindow = await determineCacheWindow(tokenAddress, profile);
     
     if (newCacheWindow !== profile.cache_window) {
-      await pool.query(`
-        UPDATE token_profiles 
-        SET cache_window = $1
-        WHERE token_address = $2
-      `, [newCacheWindow, tokenAddress]);
+      await supabase
+        .from('token_profiles')
+        .update({ cache_window: newCacheWindow })
+        .eq('token_address', tokenAddress);
       
       console.log(`Updated cache window for ${tokenAddress} to ${newCacheWindow}`);
     }
@@ -122,13 +121,15 @@ async function determineCacheWindow(tokenAddress, profile) {
 async function checkTokenActivity(tokenAddress) {
   try {
     // Check search frequency (last 24h)
-    const searchCount = await pool.query(`
-      SELECT COUNT(*) as count
-      FROM token_searches 
-      WHERE token_address = $1 AND created_at >= NOW() - interval '24 hours'
-    `, [tokenAddress]);
-
-    const searchFrequency = parseInt(searchCount.rows[0].count) || 0;
+    const { data: searchCount, error } = await supabase
+      .from('token_searches')
+      .select('id', { count: 'exact', head: true })
+      .eq('token_address', tokenAddress)
+      .gte('created_at', new Date(Date.now() - 24*60*60*1000).toISOString());
+    if (error) throw error;
+    const searchFrequency = searchCount?.length === 0 && typeof searchCount.count === 'number'
+      ? searchCount.count
+      : (searchCount?.length || 0);
     
     // Check trading volume (would integrate with Dexscreener API)
     // For now, just use search frequency
@@ -148,11 +149,13 @@ async function checkTokenActivity(tokenAddress) {
  */
 async function getTokenProfile(tokenAddress) {
   try {
-    const result = await pool.query(`
-      SELECT * FROM token_profiles WHERE token_address = $1
-    `, [tokenAddress]);
-
-    return result.rows[0] || null;
+    const { data, error } = await supabase
+      .from('token_profiles')
+      .select('*')
+      .eq('token_address', tokenAddress)
+      .maybeSingle();
+    if (error) throw error;
+    return data || null;
 
   } catch (error) {
     console.error('Error getting token profile:', error);

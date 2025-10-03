@@ -47,6 +47,14 @@ async function getPriceUSD(mint) {
         const j = await r3.json();
         const pair = j?.pairs?.find(p => p?.priceUsd);
         if (pair?.priceUsd) price = Number(pair.priceUsd);
+        // Attach basic token metadata if available
+        if (pair?.baseToken?.name || pair?.baseToken?.symbol) {
+          priceCache.set(mint + ":meta", {
+            name: pair.baseToken.name || null,
+            symbol: pair.baseToken.symbol || null,
+            timestamp: Date.now()
+          });
+        }
       }
     } catch {}
   }
@@ -55,6 +63,14 @@ async function getPriceUSD(mint) {
   priceCache.set(mint, { price, timestamp: Date.now() });
 
   return price;
+}
+
+function getCachedTokenMetadata(mint) {
+  const meta = priceCache.get(mint + ":meta");
+  if (meta && Date.now() - meta.timestamp < 3600_000) {
+    return { name: meta.name || null, symbol: meta.symbol || null };
+  }
+  return { name: null, symbol: null };
 }
 
 async function getLiquidityUSD(mint) {
@@ -75,5 +91,30 @@ async function getLiquidityUSD(mint) {
 
 module.exports = {
   getPriceUSD,
-  getLiquidityUSD
+  getLiquidityUSD,
+  getCachedTokenMetadata,
+  getTokenMetadata
 };
+
+// Fetch token name/symbol from DexScreener token endpoint
+async function getTokenMetadata(mint) {
+  try {
+    const base = DEX || 'https://api.dexscreener.com/latest/dex/tokens/';
+    const r = await fetch(base + encodeURIComponent(mint));
+    if (!r.ok) return { name: null, symbol: null };
+    const j = await r.json();
+    const pairs = j?.pairs || [];
+    if (!pairs.length) return { name: null, symbol: null };
+    // Prefer pairs where baseToken.address matches the mint, then highest liquidity
+    const matching = pairs.filter(p => p?.baseToken?.address === mint || p?.quoteToken?.address === mint);
+    const chosen = (matching.length ? matching : pairs)
+      .reduce((a, b) => (Number(a?.liquidity?.usd || 0) > Number(b?.liquidity?.usd || 0) ? a : b));
+    if (!chosen) return { name: null, symbol: null };
+    const baseToken = chosen.baseToken?.address === mint ? chosen.baseToken : chosen.quoteToken;
+    const name = baseToken?.name || null;
+    const symbol = baseToken?.symbol || null;
+    return { name, symbol };
+  } catch {
+    return { name: null, symbol: null };
+  }
+}
