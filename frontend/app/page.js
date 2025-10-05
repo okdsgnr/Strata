@@ -12,6 +12,7 @@ import OverlapCard from "../components/OverlapCard";
 import OverlapTable from "../components/OverlapTable";
 import DataStatusBar from "../components/DataStatusBar";
 import SearchInput from "../components/SearchInput";
+import SupplyConcentration from "../components/SupplyConcentration";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
@@ -497,55 +498,7 @@ export default function Home() {
             />
 
             {/* Supply Concentration */}
-            <div className="bg-surface p-4 space-y-3">
-              <h3 className="text-sm font-semibold text-white font-satoshi">Supply Concentration</h3>
-              <div className="space-y-2">
-                <ProgressStat 
-                  label="Top 1" 
-                  value={data.topN_percent_supply?.top1 ? 
-                    new Intl.NumberFormat('en-US', {
-                      style: 'percent',
-                      minimumFractionDigits: 1,
-                      maximumFractionDigits: 2
-                    }).format(data.topN_percent_supply.top1) : 'N/A'
-                  } 
-                  percent={data.topN_percent_supply?.top1 ? data.topN_percent_supply.top1 * 100 : 0} 
-                />
-                <ProgressStat 
-                  label="Top 10" 
-                  value={data.topN_percent_supply?.top10 ? 
-                    new Intl.NumberFormat('en-US', {
-                      style: 'percent',
-                      minimumFractionDigits: 1,
-                      maximumFractionDigits: 2
-                    }).format(data.topN_percent_supply.top10) : 'N/A'
-                  } 
-                  percent={data.topN_percent_supply?.top10 ? data.topN_percent_supply.top10 * 100 : 0} 
-                />
-                <ProgressStat 
-                  label="Top 50" 
-                  value={data.topN_percent_supply?.top50 ? 
-                    new Intl.NumberFormat('en-US', {
-                      style: 'percent',
-                      minimumFractionDigits: 1,
-                      maximumFractionDigits: 2
-                    }).format(data.topN_percent_supply.top50) : 'N/A'
-                  } 
-                  percent={data.topN_percent_supply?.top50 ? data.topN_percent_supply.top50 * 100 : 0} 
-                />
-                <ProgressStat 
-                  label="Top 100" 
-                  value={data.topN_percent_supply?.top100 ? 
-                    new Intl.NumberFormat('en-US', {
-                      style: 'percent',
-                      minimumFractionDigits: 1,
-                      maximumFractionDigits: 2
-                    }).format(data.topN_percent_supply.top100) : 'N/A'
-                  } 
-                  percent={data.topN_percent_supply?.top100 ? data.topN_percent_supply.top100 * 100 : 0} 
-                />
-              </div>
-            </div>
+            <SupplyConcentration topN_percent_supply={data.topN_percent_supply} />
 
             {/* Changes vs Previous Snapshot */}
             {data.deltas && (
