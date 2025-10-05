@@ -106,7 +106,7 @@ async function handler(req, res) {
     let notable_holders = [];
     let tierSupplyFromTop = { whale: 0, shark: 0, dolphin: 0, fish: 0, shrimp: 0 };
     try {
-      // Get top holders from database
+      // First try to get top holders from token_top_holders
       const { data: topHolders } = await sb
         .from('token_top_holders')
         .select('*')
@@ -137,6 +137,48 @@ async function handler(req, res) {
           else if (t === 'Dolphin') tierSupplyFromTop.dolphin += share;
           else if (t === 'Fish') tierSupplyFromTop.fish += share;
           else if (t === 'Shrimp') tierSupplyFromTop.shrimp += share;
+        }
+      } else {
+        // Fallback: get top holders from whale_wallet_holdings_current
+        console.log('No token_top_holders data, falling back to whale_wallet_holdings_current');
+        const { data: whaleHolders } = await sb
+          .from('whale_wallet_holdings_current')
+          .select('*')
+          .eq('token_address', mint)
+          .order('amount_raw', { ascending: false })
+          .limit(100);
+        
+        if (whaleHolders && whaleHolders.length > 0) {
+          // Get labels for these addresses
+          const addresses = whaleHolders.map(h => h.wallet_address);
+          const { data: labels } = await sb
+            .from('wallet_labels')
+            .select('address, type, label')
+            .in('address', addresses);
+          
+          const labelMap = new Map();
+          if (labels) {
+            labels.forEach(label => {
+              labelMap.set(label.address, { type: label.type, label: label.label });
+            });
+          }
+          
+          // Format holders with labels and USD values
+          const formattedHolders = whaleHolders.map(h => {
+            const amount = Number(h.amount_raw) / Math.pow(10, h.token_decimals);
+            const usdValue = amount * (snapshot.price_usd || 0);
+            const label = labelMap.get(h.wallet_address);
+            
+            return {
+              address: h.wallet_address,
+              label: label ? label.label : null,
+              balance_ui: amount,
+              balance_usd: usdValue,
+              percent_supply: totalSupply > 0 ? amount / totalSupply : 0
+            };
+          });
+          
+          notable_holders = await getNotableHoldersWithChanges(mint, formattedHolders, snapshot.id, totalSupply);
         }
       }
     } catch (error) {
