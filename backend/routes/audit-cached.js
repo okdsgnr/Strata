@@ -139,7 +139,7 @@ async function handler(req, res) {
           else if (t === 'Shrimp') tierSupplyFromTop.shrimp += share;
         }
       } else {
-        // Fallback: get top holders from whale_wallet_holdings_current
+        // Fallback: get top 100 holders from whale_wallet_holdings_current
         console.log('No token_top_holders data, falling back to whale_wallet_holdings_current');
         const { data: whaleHolders } = await sb
           .from('whale_wallet_holdings_current')
@@ -148,6 +148,8 @@ async function handler(req, res) {
           .order('amount_raw', { ascending: false })
           .limit(100);
         
+        console.log('Found whale holders:', whaleHolders?.length || 0);
+        
         if (whaleHolders && whaleHolders.length > 0) {
           // Get labels for these addresses
           const addresses = whaleHolders.map(h => h.wallet_address);
@@ -155,6 +157,8 @@ async function handler(req, res) {
             .from('wallet_labels')
             .select('address, type, label')
             .in('address', addresses);
+          
+          console.log('Found labels:', labels?.length || 0);
           
           const labelMap = new Map();
           if (labels) {
@@ -178,7 +182,12 @@ async function handler(req, res) {
             };
           });
           
+          console.log('Formatted holders count:', formattedHolders.length);
+          console.log('Sample formatted holder:', formattedHolders[0]);
+          
           notable_holders = await getNotableHoldersWithChanges(mint, formattedHolders, snapshot.id, totalSupply);
+          
+          console.log('After getNotableHoldersWithChanges, count:', notable_holders.length);
         }
       }
     } catch (error) {
